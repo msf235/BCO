@@ -87,7 +87,6 @@ class BCOCartPole(BCO):
             obs, reward, terminated, truncated, _ = self.env.step(A)
             state = obs
             total_reward += reward
-
         return total_reward
 
 
