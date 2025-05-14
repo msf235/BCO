@@ -42,6 +42,11 @@ parser.add_argument(
     default=50,
     help="print loss/reward every print_freq iterations (0 to disable)",
 )
+parser.add_argument(
+    "--continuous",
+    action="store_true",
+    help="if set, treat actions as continuous real-valued vectors",
+)
 
 args = parser.parse_args()
 

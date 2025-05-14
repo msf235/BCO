@@ -62,6 +62,14 @@ class BCO:
         self.policy = PolicyModel(state_dim, action_dim).to(self.device)
         self.idm = IDMModel(state_dim, action_dim).to(self.device)
 
+        def _init_weights(m):
+            if isinstance(m, nn.Linear):
+                weight_initializer(m.weight, std=0.1)  # truncated normal std=0.1
+                bias_initializer(m.bias, val=0.01)  # constant 0.01
+
+        self.policy.apply(_init_weights)
+        self.idm.apply(_init_weights)
+
         # optimizers
         self.opt_policy = optim.Adam(self.policy.parameters(), lr=self.lr)
         self.opt_idm = optim.Adam(self.idm.parameters(), lr=self.lr)
@@ -77,14 +85,6 @@ class BCO:
         self.inputs = None
         self.targets = None
         self.num_sample = None
-
-        def _init_weights(m):
-            if isinstance(m, nn.Linear):
-                weight_initializer(m.weight, std=0.1)  # truncated normal std=0.1
-                bias_initializer(m.bias, val=0.01)  # constant 0.01
-
-        self.policy.apply(_init_weights)
-        self.idm.apply(_init_weights)
 
     def load_demonstration(self):
         if args.input_filename is None or not os.path.isfile(args.input_filename):
@@ -128,8 +128,6 @@ class BCO:
         """
         self.idm.eval()
         with torch.no_grad():
-            import numpy as np
-
             # 1) Stack into contiguous arrays
             sb_np = np.array(state_batch, dtype=np.float32)  # [B, state_dim]
             nsb_np = np.array(next_state_batch, dtype=np.float32)  # [B, state_dim]
@@ -192,8 +190,6 @@ class BCO:
         """
         self.policy.eval()
         with torch.no_grad():
-            import numpy as np
-
             # 1) stack lists into contiguous arrays
             s_np = np.array(states, dtype=np.float32)  # shape [B, state_dim]
             a_np = np.array(actions, dtype=np.float32)  # shape [B, action_dim]
@@ -217,8 +213,6 @@ class BCO:
         """
         self.idm.eval()
         with torch.no_grad():
-            import numpy as np
-
             # 1) stack lists into contiguous arrays
             s_np = np.array(states, dtype=np.float32)  # [B, state_dim]
             ns_np = np.array(next_states, dtype=np.float32)  # [B, state_dim]
@@ -245,7 +239,7 @@ class BCO:
         """override: policy rollout to collect (s, s', a)"""
         raise NotImplementedError
 
-    def eval_rwd_policy(self):
+    def eval_rwd_policy(self, display=False):
         """override: compute total reward by running policy in env"""
         raise NotImplementedError
 
@@ -253,6 +247,8 @@ class BCO:
         # load pre-demonstration data for idm
         S_pre, nS_pre, A_pre = self.pre_demonstration()
         self.update_idm(S_pre, nS_pre, A_pre)
+
+        display = True
 
         start_time = time.time()
         for ep in range(self.max_episodes):
@@ -275,10 +271,10 @@ class BCO:
 
             if should(args.print_freq):
                 elapsed = time.time() - start_time
-                total_r = self.eval_rwd_policy()
+                total_r = self.eval_rwd_policy(display)
                 print(
                     f"Episode {ep+1:5d} | reward {total_r:6.1f} | "
-                    f"policy loss {ploss:.6f} | idm loss {idmloss:.6f} | "
+                    f"policy loss {ploss:.6f} | idm loss {idmloss:.6e} | "
                     f"{elapsed/args.print_freq:.3f} sec/ep"
                 )
                 start_time = time.time()

@@ -10,8 +10,17 @@ class BCOCartPole(BCO):
         super().__init__(state_dim=4, action_dim=2)
         self.env = gym.make(
             "CartPole-v0",
-            # render_mode="human"
         )
+
+    def enable_rendering(self):
+        # close old env and open a new one with human render
+        self.env.close()
+        self.env = gym.make("CartPole-v0", render_mode="human")
+
+    def disable_rendering(self):
+        # close human env and go back to headless
+        self.env.close()
+        self.env = gym.make("CartPole-v0", render_mode=None)
 
     def pre_demonstration(self):
         """Collect (s, s', a) by sampling uniform random actions."""
@@ -75,12 +84,14 @@ class BCOCartPole(BCO):
 
         return States, Nstates, Actions
 
-    def eval_rwd_policy(self):
+    def eval_rwd_policy(self, display=False):
         """Run one episode with the current policy, return total reward."""
         terminated = False
         truncated = False
         total_reward = 0.0
 
+        if display:
+            self.enable_rendering()
         obs, _ = self.env.reset()
         state = obs
 
@@ -90,6 +101,8 @@ class BCOCartPole(BCO):
             obs, reward, terminated, truncated, _ = self.env.step(A)
             state = obs
             total_reward += reward
+        if display:
+            self.disable_rendering()
         return total_reward
 
 
