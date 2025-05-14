@@ -66,13 +66,8 @@ class BCO:
         self.opt_policy = optim.Adam(self.policy.parameters(), lr=self.lr)
         self.opt_idm = optim.Adam(self.idm.parameters(), lr=self.lr)
 
-        # losses
-        # self.criterion = nn.MSELoss()
-        # self.criterion = nn.CrossEntropyLoss()
         self.policy_criterion = nn.CrossEntropyLoss()
         self.idm_criterion = nn.CrossEntropyLoss()
-        # self.opt_policy = optim.Adam(self.policy.parameters(), lr=self.lr)
-        # self.opt_idm = optim.Adam(self.idm.parameters(), lr=self.lr)
 
         # TensorBoard
         self.writer = SummaryWriter(log_dir="logdir/")
@@ -126,14 +121,6 @@ class BCO:
             a = self.policy(x)
         return a.cpu().numpy()
 
-    # def eval_idm(self, state_batch, next_state_batch):
-    #     self.idm.eval()
-    #     with torch.no_grad():
-    #         s = torch.tensor(state_batch, dtype=torch.float32, device=self.device)
-    #         ns = torch.tensor(next_state_batch, dtype=torch.float32, device=self.device)
-    #         a = self.idm(s, ns)
-    #     return a.cpu().numpy()
-
     def eval_idm(self, state_batch, next_state_batch):
         """
         Predict the IDM logits for a batch of (state, next_state) pairs.
@@ -157,29 +144,6 @@ class BCO:
             # 4) Back to NumPy for downstream argmax / one‐hot logic
             return logits.cpu().numpy()
 
-    # def update_policy(self, states, actions):
-    #     self.policy.train()
-    #     idxs = get_shuffle_idx(len(states), self.batch_size)
-    #     for idx in idxs:
-    #         # batch_s = torch.tensor(
-    #         #     [states[i] for i in idx], dtype=torch.float32, device=self.device
-    #         # )
-    #         # batch_a = torch.tensor(
-    #         #     [actions[i] for i in idx], dtype=torch.float32, device=self.device
-    #         # )
-    #         # convert list-of-arrays → one contiguous array
-    #         batch_s_np = np.array([states[i] for i in idx], dtype=np.float32)
-    #         batch_a_np = np.array([actions[i] for i in idx], dtype=np.float32)
-    #         # then to tensor without warning
-    #         batch_s = torch.from_numpy(batch_s_np).to(self.device)
-    #         batch_a = torch.from_numpy(batch_a_np).to(self.device)
-    #
-    #         pred = self.policy(batch_s)
-    #         loss = self.policy_criterion(pred, batch_a)
-    #         self.opt_policy.zero_grad()
-    #         loss.backward()
-    #         self.opt_policy.step()
-    #
     def update_policy(self, states, actions):
         self.policy.train()
         idxs = get_shuffle_idx(len(states), self.batch_size)
@@ -209,37 +173,17 @@ class BCO:
         self.idm.train()
         idxs = get_shuffle_idx(len(states), self.batch_size)
         for idx in idxs:
-            # batch_s = torch.tensor(
-            #     [states[i] for i in idx], dtype=torch.float32, device=self.device
-            # )
-            # batch_ns = torch.tensor(
-            #     [next_states[i] for i in idx], dtype=torch.float32, device=self.device
-            # )
-            # batch_a = torch.tensor(
-            #     [actions[i] for i in idx], dtype=torch.float32, device=self.device
-            # )
             batch_s_np = np.array([states[i] for i in idx], dtype=np.float32)
             batch_ns_np = np.array([next_states[i] for i in idx], dtype=np.float32)
             batch_a_np = np.array([actions[i] for i in idx], dtype=np.float32)
             batch_s = torch.from_numpy(batch_s_np).to(self.device)
             batch_ns = torch.from_numpy(batch_ns_np).to(self.device)
-            # batch_a = torch.from_numpy(batch_a_np).to(self.device)
-            # pred = self.idm(batch_s, batch_ns)
-            # loss = self.criterion(pred, batch_a)
             labels = torch.from_numpy(batch_a_np.argmax(axis=1)).long().to(self.device)
             logits = self.idm(batch_s, batch_ns)
             loss = self.idm_criterion(logits, labels)
             self.opt_idm.zero_grad()
             loss.backward()
             self.opt_idm.step()
-
-    # def get_policy_loss(self, states, actions):
-    #     self.policy.eval()
-    #     with torch.no_grad():
-    #         s = torch.tensor(states, dtype=torch.float32, device=self.device)
-    #         a = torch.tensor(actions, dtype=torch.float32, device=self.device)
-    #         pred = self.policy(s)
-    #         return self.criterion(pred, a).item()
 
     def get_policy_loss(self, states, actions):
         """
@@ -265,25 +209,6 @@ class BCO:
             loss = self.policy_criterion(logits, labels)  # nn.CrossEntropyLoss
 
             return loss.item()
-
-    # def get_idm_loss(self, states, next_states, actions):
-    #     self.idm.eval()
-    #     with torch.no_grad():
-    #         # s = torch.tensor(states, dtype=torch.float32, device=self.device)
-    #         # ns = torch.tensor(next_states, dtype=torch.float32, device=self.device)
-    #         # stack lists of np.ndarray into contiguous arrays
-    #         s_np = np.array(states, dtype=np.float32)
-    #         ns_np = np.array(next_states, dtype=np.float32)
-    #         a_np = np.array(actions, dtype=np.float32)
-    #
-    #         # convert once to tensors
-    #         s = torch.from_numpy(s_np).to(self.device)
-    #         ns = torch.from_numpy(ns_np).to(self.device)
-    #         a = torch.from_numpy(a_np).to(
-    #             self.device
-    #         )  # a = torch.tensor(actions, dtype=torch.float32, device=self.device)
-    #         pred = self.idm(s, ns)
-    #         return self.criterion(pred, a).item()
 
     def get_idm_loss(self, states, next_states, actions):
         """
