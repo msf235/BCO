@@ -17,7 +17,7 @@ class PolicyModel(nn.Module):
             nn.LeakyReLU(0.2),
             nn.Linear(8, 8),
             nn.LeakyReLU(0.2),
-            nn.Linear(8, action_dim),
+            nn.Linear(8, action_dim),  # continuous or logits output
         )
 
     def forward(self, x):
@@ -32,7 +32,7 @@ class IDMModel(nn.Module):
             nn.LeakyReLU(0.2),
             nn.Linear(8, 8),
             nn.LeakyReLU(0.2),
-            nn.Linear(8, action_dim),
+            nn.Linear(8, action_dim),  # continuous or logits output
         )
 
     def forward(self, state, next_state):
@@ -46,8 +46,6 @@ class BCO:
         self.state_dim = state_dim
         self.action_dim = action_dim
 
-        # args.lr = 0.0001
-
         # hyperparameters
         self.lr = args.lr
         self.max_episodes = args.max_episodes
@@ -55,32 +53,41 @@ class BCO:
         self.alpha = 0.01
         self.M = args.M
 
+        # detect continuous vs discrete from args
+        self.continuous = getattr(args, "continuous", False)
+
         # device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # models
+        # initialize models
         self.policy = PolicyModel(state_dim, action_dim).to(self.device)
         self.idm = IDMModel(state_dim, action_dim).to(self.device)
 
+        # apply TensorFlow-like weight init
         def _init_weights(m):
             if isinstance(m, nn.Linear):
-                weight_initializer(m.weight, std=0.1)  # truncated normal std=0.1
-                bias_initializer(m.bias, val=0.01)  # constant 0.01
+                weight_initializer(m.weight, std=0.1)
+                bias_initializer(m.bias, val=0.01)
 
         self.policy.apply(_init_weights)
         self.idm.apply(_init_weights)
+
+        # set loss functions based on action type
+        if self.continuous:
+            self.policy_criterion = nn.MSELoss()
+            self.idm_criterion = nn.MSELoss()
+        else:
+            self.policy_criterion = nn.CrossEntropyLoss()
+            self.idm_criterion = nn.CrossEntropyLoss()
 
         # optimizers
         self.opt_policy = optim.Adam(self.policy.parameters(), lr=self.lr)
         self.opt_idm = optim.Adam(self.idm.parameters(), lr=self.lr)
 
-        self.policy_criterion = nn.CrossEntropyLoss()
-        self.idm_criterion = nn.CrossEntropyLoss()
-
-        # TensorBoard
+        # TensorBoard writer
         self.writer = SummaryWriter(log_dir="logdir/")
 
-        # placeholders for demonstration
+        # placeholders for demonstration data
         self.demo_examples = None
         self.inputs = None
         self.targets = None
@@ -101,7 +108,6 @@ class BCO:
                 print(f"Loading demonstration {i+1}")
             if i + 1 >= 50000:
                 break
-
         return len(inputs), inputs, targets
 
     def sample_demo(self):
@@ -115,120 +121,115 @@ class BCO:
     def eval_policy(self, state_batch):
         self.policy.eval()
         with torch.no_grad():
-            # x = torch.tensor(state_batch, dtype=torch.float32, device=self.device)
             sb = np.array(state_batch, dtype=np.float32)
             x = torch.from_numpy(sb).to(self.device)
-            a = self.policy(x)
-        return a.cpu().numpy()
+            out = self.policy(x)
+        return out.cpu().numpy()
 
     def eval_idm(self, state_batch, next_state_batch):
-        """
-        Predict the IDM logits for a batch of (state, next_state) pairs.
-        Returns a NumPy array of shape [B, action_dim].
-        """
         self.idm.eval()
         with torch.no_grad():
-            # 1) Stack into contiguous arrays
-            sb_np = np.array(state_batch, dtype=np.float32)  # [B, state_dim]
-            nsb_np = np.array(next_state_batch, dtype=np.float32)  # [B, state_dim]
-
-            # 2) Convert once to tensors on the correct device
-            s = torch.from_numpy(sb_np).to(self.device)  # [B, S]
-            ns = torch.from_numpy(nsb_np).to(self.device)  # [B, S]
-
-            # 3) Forward pass to get logits
-            logits = self.idm(s, ns)  # [B, action_dim]
-
-            # 4) Back to NumPy for downstream argmax / one‐hot logic
-            return logits.cpu().numpy()
+            sb = np.array(state_batch, dtype=np.float32)
+            nsb = np.array(next_state_batch, dtype=np.float32)
+            s = torch.from_numpy(sb).to(self.device)
+            ns = torch.from_numpy(nsb).to(self.device)
+            out = self.idm(s, ns)
+        return out.cpu().numpy()
 
     def update_policy(self, states, actions):
         self.policy.train()
-        idxs = get_shuffle_idx(len(states), self.batch_size)
-        for idx in idxs:
-            # 1) stack into a single NumPy array
-            batch_s_np = np.array([states[i] for i in idx], dtype=np.float32)
-            batch_a_np = np.array(
-                [actions[i] for i in idx], dtype=np.float32
-            )  # one-hot
-
-            # 2) to torch tensors
-            batch_s = torch.from_numpy(batch_s_np).to(self.device)  # [B, state_dim]
-            labels = torch.from_numpy(
-                batch_a_np.argmax(axis=1).astype(np.int64)  # → [B]
+        for idx in get_shuffle_idx(len(states), self.batch_size):
+            batch_s = torch.from_numpy(
+                np.array([states[i] for i in idx], dtype=np.float32)
             ).to(self.device)
 
-            # 3) forward + correct CE loss
-            logits = self.policy(batch_s)  # [B, action_dim]
-            loss = self.policy_criterion(logits, labels)  # expects [B] labels
+            if self.continuous:
+                batch_a = torch.from_numpy(
+                    np.array([actions[i] for i in idx], dtype=np.float32)
+                ).to(self.device)
+                pred = self.policy(batch_s)
+                loss = self.policy_criterion(pred, batch_a)
+            else:
+                batch_a = np.array([actions[i] for i in idx], dtype=np.float32)
+                labels = torch.from_numpy(batch_a.argmax(axis=1).astype(np.int64)).to(
+                    self.device
+                )
+                logits = self.policy(batch_s)
+                loss = self.policy_criterion(logits, labels)
 
-            # 4) backward + step
             self.opt_policy.zero_grad()
             loss.backward()
             self.opt_policy.step()
 
     def update_idm(self, states, next_states, actions):
         self.idm.train()
-        idxs = get_shuffle_idx(len(states), self.batch_size)
-        for idx in idxs:
-            batch_s_np = np.array([states[i] for i in idx], dtype=np.float32)
-            batch_ns_np = np.array([next_states[i] for i in idx], dtype=np.float32)
-            batch_a_np = np.array([actions[i] for i in idx], dtype=np.float32)
-            batch_s = torch.from_numpy(batch_s_np).to(self.device)
-            batch_ns = torch.from_numpy(batch_ns_np).to(self.device)
-            labels = torch.from_numpy(batch_a_np.argmax(axis=1)).long().to(self.device)
-            logits = self.idm(batch_s, batch_ns)
-            loss = self.idm_criterion(logits, labels)
+        for idx in get_shuffle_idx(len(states), self.batch_size):
+            batch_s = torch.from_numpy(
+                np.array([states[i] for i in idx], dtype=np.float32)
+            ).to(self.device)
+            batch_ns = torch.from_numpy(
+                np.array([next_states[i] for i in idx], dtype=np.float32)
+            ).to(self.device)
+
+            if self.continuous:
+                batch_a = torch.from_numpy(
+                    np.array([actions[i] for i in idx], dtype=np.float32)
+                ).to(self.device)
+                pred = self.idm(batch_s, batch_ns)
+                loss = self.idm_criterion(pred, batch_a)
+            else:
+                batch_a = np.array([actions[i] for i in idx], dtype=np.float32)
+                labels = torch.from_numpy(batch_a.argmax(axis=1).astype(np.int64)).to(
+                    self.device
+                )
+                logits = self.idm(batch_s, batch_ns)
+                loss = self.idm_criterion(logits, labels)
+
             self.opt_idm.zero_grad()
             loss.backward()
             self.opt_idm.step()
 
     def get_policy_loss(self, states, actions):
-        """
-        Compute the policy’s cross-entropy loss on (states, one-hot actions).
-        Returns a non-negative scalar.
-        """
         self.policy.eval()
         with torch.no_grad():
-            # 1) stack lists into contiguous arrays
-            s_np = np.array(states, dtype=np.float32)  # shape [B, state_dim]
-            a_np = np.array(actions, dtype=np.float32)  # shape [B, action_dim]
+            s = torch.from_numpy(np.array(states, dtype=np.float32)).to(self.device)
 
-            # 2) convert to tensors
-            s = torch.from_numpy(s_np).to(self.device)  # [B, S]
-            labels = torch.from_numpy(
-                a_np.argmax(axis=1).astype(np.int64)  # one-hot → [B] class indices
-            ).to(self.device)
-
-            # 3) forward + CE loss
-            logits = self.policy(s)  # [B, action_dim]
-            loss = self.policy_criterion(logits, labels)  # nn.CrossEntropyLoss
-
+            if self.continuous:
+                a = torch.from_numpy(np.array(actions, dtype=np.float32)).to(
+                    self.device
+                )
+                pred = self.policy(s)
+                loss = self.policy_criterion(pred, a)
+            else:
+                a_np = np.array(actions, dtype=np.float32)
+                labels = torch.from_numpy(a_np.argmax(axis=1).astype(np.int64)).to(
+                    self.device
+                )
+                logits = self.policy(s)
+                loss = self.policy_criterion(logits, labels)
             return loss.item()
 
     def get_idm_loss(self, states, next_states, actions):
-        """
-        Compute the inverse‐dynamics model’s cross‐entropy loss on
-        (states, next_states, one‐hot actions).
-        """
         self.idm.eval()
         with torch.no_grad():
-            # 1) stack lists into contiguous arrays
-            s_np = np.array(states, dtype=np.float32)  # [B, state_dim]
-            ns_np = np.array(next_states, dtype=np.float32)  # [B, state_dim]
-            a_np = np.array(actions, dtype=np.float32)  # [B, action_dim]
+            s = torch.from_numpy(np.array(states, dtype=np.float32)).to(self.device)
+            ns = torch.from_numpy(np.array(next_states, dtype=np.float32)).to(
+                self.device
+            )
 
-            # 2) to tensors
-            s = torch.from_numpy(s_np).to(self.device)  # [B, S]
-            ns = torch.from_numpy(ns_np).to(self.device)  # [B, S]
-            labels = torch.from_numpy(
-                a_np.argmax(axis=1).astype(np.int64)  # one-hot → [B]
-            ).to(self.device)
-
-            # 3) forward + CE loss
-            logits = self.idm(s, ns)  # [B, action_dim]
-            loss = self.idm_criterion(logits, labels)  # nn.CrossEntropyLoss
-
+            if self.continuous:
+                a = torch.from_numpy(np.array(actions, dtype=np.float32)).to(
+                    self.device
+                )
+                pred = self.idm(s, ns)
+                loss = self.idm_criterion(pred, a)
+            else:
+                a_np = np.array(actions, dtype=np.float32)
+                labels = torch.from_numpy(a_np.argmax(axis=1).astype(np.int64)).to(
+                    self.device
+                )
+                logits = self.idm(s, ns)
+                loss = self.idm_criterion(logits, labels)
             return loss.item()
 
     def pre_demonstration(self):
@@ -244,7 +245,6 @@ class BCO:
         raise NotImplementedError
 
     def train(self):
-        # load pre-demonstration data for idm
         S_pre, nS_pre, A_pre = self.pre_demonstration()
         self.update_idm(S_pre, nS_pre, A_pre)
 
@@ -258,13 +258,13 @@ class BCO:
                     (ep + 1) % freq == 0 or ep == self.max_episodes - 1
                 )
 
-            # policy update from demo
+            # POLICY UPDATES
             S, nS = self.sample_demo()
             A_idm = self.eval_idm(S, nS)
             self.update_policy(S, A_idm)
             ploss = self.get_policy_loss(S, A_idm)
 
-            # idm update from policy rollouts
+            # IDM UPDATES
             S2, nS2, A2 = self.post_demonstration()
             self.update_idm(S2, nS2, A2)
             idmloss = self.get_idm_loss(S2, nS2, A2)
@@ -274,24 +274,21 @@ class BCO:
                 total_r = self.eval_rwd_policy(display)
                 print(
                     f"Episode {ep+1:5d} | reward {total_r:6.1f} | "
-                    f"policy loss {ploss:.6f} | idm loss {idmloss:.6e} | "
+                    f"policy loss {ploss:.6e} | idm loss {idmloss:.6e} | "
                     f"{elapsed/args.print_freq:.3f} sec/ep"
                 )
                 start_time = time.time()
 
             if should(args.save_freq):
                 os.makedirs(args.model_dir, exist_ok=True)
-                save_path = os.path.join(args.model_dir, "model.pth")
-                torch.save(
-                    {
-                        "policy": self.policy.state_dict(),
-                        "idm": self.idm.state_dict(),
-                        "opt_policy": self.opt_policy.state_dict(),
-                        "opt_idm": self.opt_idm.state_dict(),
-                    },
-                    save_path,
-                )
-                print(f"Model saved to {save_path}")
+                ckpt = {
+                    "policy": self.policy.state_dict(),
+                    "idm": self.idm.state_dict(),
+                    "opt_policy": self.opt_policy.state_dict(),
+                    "opt_idm": self.opt_idm.state_dict(),
+                }
+                torch.save(ckpt, os.path.join(args.model_dir, "model.pth"))
+                print(f"Model saved to {args.model_dir}/model.pth")
 
     def test(self):
         ckpt_path = os.path.join(args.model_dir, "model.pth")
