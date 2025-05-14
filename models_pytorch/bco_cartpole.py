@@ -9,7 +9,7 @@ class BCOCartPole(BCO):
         # CartPole has state dim 4, discrete action dim 2
         super().__init__(state_dim=4, action_dim=2)
         self.env = gym.make(
-            "CartPole-v1",
+            "CartPole-v0",
             # render_mode="human"
         )
 

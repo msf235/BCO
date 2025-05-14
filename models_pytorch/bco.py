@@ -5,17 +5,19 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import gymnasium as gym
-from utils import get_shuffle_idx, args
+from utils import get_shuffle_idx, args, weight_initializer, bias_initializer
 from torch.utils.tensorboard import SummaryWriter
 
 
 class PolicyModel(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim=128, negative_slope=0.01):
+    def __init__(self, state_dim, action_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
-            nn.LeakyReLU(negative_slope),
-            nn.Linear(hidden_dim, action_dim),
+            nn.Linear(state_dim, 8),
+            nn.LeakyReLU(0.2),
+            nn.Linear(8, 8),
+            nn.LeakyReLU(0.2),
+            nn.Linear(8, action_dim),
         )
 
     def forward(self, x):
@@ -23,13 +25,14 @@ class PolicyModel(nn.Module):
 
 
 class IDMModel(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim=128, negative_slope=0.01):
+    def __init__(self, state_dim, action_dim):
         super().__init__()
-        # input is concatenation of state and next_state
         self.net = nn.Sequential(
-            nn.Linear(2 * state_dim, hidden_dim),
-            nn.LeakyReLU(negative_slope),
-            nn.Linear(hidden_dim, action_dim),
+            nn.Linear(2 * state_dim, 8),
+            nn.LeakyReLU(0.2),
+            nn.Linear(8, 8),
+            nn.LeakyReLU(0.2),
+            nn.Linear(8, action_dim),
         )
 
     def forward(self, state, next_state):
@@ -42,6 +45,8 @@ class BCO:
         # dimensions
         self.state_dim = state_dim
         self.action_dim = action_dim
+
+        # args.lr = 0.0001
 
         # hyperparameters
         self.lr = args.lr
@@ -62,7 +67,12 @@ class BCO:
         self.opt_idm = optim.Adam(self.idm.parameters(), lr=self.lr)
 
         # losses
-        self.criterion = nn.MSELoss()
+        # self.criterion = nn.MSELoss()
+        # self.criterion = nn.CrossEntropyLoss()
+        self.policy_criterion = nn.CrossEntropyLoss()
+        self.idm_criterion = nn.CrossEntropyLoss()
+        # self.opt_policy = optim.Adam(self.policy.parameters(), lr=self.lr)
+        # self.opt_idm = optim.Adam(self.idm.parameters(), lr=self.lr)
 
         # TensorBoard
         self.writer = SummaryWriter(log_dir="logdir/")
@@ -72,6 +82,14 @@ class BCO:
         self.inputs = None
         self.targets = None
         self.num_sample = None
+
+        def _init_weights(m):
+            if isinstance(m, nn.Linear):
+                weight_initializer(m.weight, std=0.1)  # truncated normal std=0.1
+                bias_initializer(m.bias, val=0.01)  # constant 0.01
+
+        self.policy.apply(_init_weights)
+        self.idm.apply(_init_weights)
 
     def load_demonstration(self):
         if args.input_filename is None or not os.path.isfile(args.input_filename):
@@ -102,37 +120,87 @@ class BCO:
     def eval_policy(self, state_batch):
         self.policy.eval()
         with torch.no_grad():
-            x = torch.tensor(state_batch, dtype=torch.float32, device=self.device)
+            # x = torch.tensor(state_batch, dtype=torch.float32, device=self.device)
+            sb = np.array(state_batch, dtype=np.float32)
+            x = torch.from_numpy(sb).to(self.device)
             a = self.policy(x)
         return a.cpu().numpy()
 
+    # def eval_idm(self, state_batch, next_state_batch):
+    #     self.idm.eval()
+    #     with torch.no_grad():
+    #         s = torch.tensor(state_batch, dtype=torch.float32, device=self.device)
+    #         ns = torch.tensor(next_state_batch, dtype=torch.float32, device=self.device)
+    #         a = self.idm(s, ns)
+    #     return a.cpu().numpy()
+
     def eval_idm(self, state_batch, next_state_batch):
+        """
+        Predict the IDM logits for a batch of (state, next_state) pairs.
+        Returns a NumPy array of shape [B, action_dim].
+        """
         self.idm.eval()
         with torch.no_grad():
-            s = torch.tensor(state_batch, dtype=torch.float32, device=self.device)
-            ns = torch.tensor(next_state_batch, dtype=torch.float32, device=self.device)
-            a = self.idm(s, ns)
-        return a.cpu().numpy()
+            import numpy as np
 
+            # 1) Stack into contiguous arrays
+            sb_np = np.array(state_batch, dtype=np.float32)  # [B, state_dim]
+            nsb_np = np.array(next_state_batch, dtype=np.float32)  # [B, state_dim]
+
+            # 2) Convert once to tensors on the correct device
+            s = torch.from_numpy(sb_np).to(self.device)  # [B, S]
+            ns = torch.from_numpy(nsb_np).to(self.device)  # [B, S]
+
+            # 3) Forward pass to get logits
+            logits = self.idm(s, ns)  # [B, action_dim]
+
+            # 4) Back to NumPy for downstream argmax / one‐hot logic
+            return logits.cpu().numpy()
+
+    # def update_policy(self, states, actions):
+    #     self.policy.train()
+    #     idxs = get_shuffle_idx(len(states), self.batch_size)
+    #     for idx in idxs:
+    #         # batch_s = torch.tensor(
+    #         #     [states[i] for i in idx], dtype=torch.float32, device=self.device
+    #         # )
+    #         # batch_a = torch.tensor(
+    #         #     [actions[i] for i in idx], dtype=torch.float32, device=self.device
+    #         # )
+    #         # convert list-of-arrays → one contiguous array
+    #         batch_s_np = np.array([states[i] for i in idx], dtype=np.float32)
+    #         batch_a_np = np.array([actions[i] for i in idx], dtype=np.float32)
+    #         # then to tensor without warning
+    #         batch_s = torch.from_numpy(batch_s_np).to(self.device)
+    #         batch_a = torch.from_numpy(batch_a_np).to(self.device)
+    #
+    #         pred = self.policy(batch_s)
+    #         loss = self.policy_criterion(pred, batch_a)
+    #         self.opt_policy.zero_grad()
+    #         loss.backward()
+    #         self.opt_policy.step()
+    #
     def update_policy(self, states, actions):
         self.policy.train()
         idxs = get_shuffle_idx(len(states), self.batch_size)
         for idx in idxs:
-            # batch_s = torch.tensor(
-            #     [states[i] for i in idx], dtype=torch.float32, device=self.device
-            # )
-            # batch_a = torch.tensor(
-            #     [actions[i] for i in idx], dtype=torch.float32, device=self.device
-            # )
-            # convert list-of-arrays → one contiguous array
+            # 1) stack into a single NumPy array
             batch_s_np = np.array([states[i] for i in idx], dtype=np.float32)
-            batch_a_np = np.array([actions[i] for i in idx], dtype=np.float32)
-            # then to tensor without warning
-            batch_s = torch.from_numpy(batch_s_np).to(self.device)
-            batch_a = torch.from_numpy(batch_a_np).to(self.device)
+            batch_a_np = np.array(
+                [actions[i] for i in idx], dtype=np.float32
+            )  # one-hot
 
-            pred = self.policy(batch_s)
-            loss = self.criterion(pred, batch_a)
+            # 2) to torch tensors
+            batch_s = torch.from_numpy(batch_s_np).to(self.device)  # [B, state_dim]
+            labels = torch.from_numpy(
+                batch_a_np.argmax(axis=1).astype(np.int64)  # → [B]
+            ).to(self.device)
+
+            # 3) forward + correct CE loss
+            logits = self.policy(batch_s)  # [B, action_dim]
+            loss = self.policy_criterion(logits, labels)  # expects [B] labels
+
+            # 4) backward + step
             self.opt_policy.zero_grad()
             loss.backward()
             self.opt_policy.step()
@@ -155,39 +223,94 @@ class BCO:
             batch_a_np = np.array([actions[i] for i in idx], dtype=np.float32)
             batch_s = torch.from_numpy(batch_s_np).to(self.device)
             batch_ns = torch.from_numpy(batch_ns_np).to(self.device)
-            batch_a = torch.from_numpy(batch_a_np).to(self.device)
-            pred = self.idm(batch_s, batch_ns)
-            loss = self.criterion(pred, batch_a)
+            # batch_a = torch.from_numpy(batch_a_np).to(self.device)
+            # pred = self.idm(batch_s, batch_ns)
+            # loss = self.criterion(pred, batch_a)
+            labels = torch.from_numpy(batch_a_np.argmax(axis=1)).long().to(self.device)
+            logits = self.idm(batch_s, batch_ns)
+            loss = self.idm_criterion(logits, labels)
             self.opt_idm.zero_grad()
             loss.backward()
             self.opt_idm.step()
 
+    # def get_policy_loss(self, states, actions):
+    #     self.policy.eval()
+    #     with torch.no_grad():
+    #         s = torch.tensor(states, dtype=torch.float32, device=self.device)
+    #         a = torch.tensor(actions, dtype=torch.float32, device=self.device)
+    #         pred = self.policy(s)
+    #         return self.criterion(pred, a).item()
+
     def get_policy_loss(self, states, actions):
+        """
+        Compute the policy’s cross-entropy loss on (states, one-hot actions).
+        Returns a non-negative scalar.
+        """
         self.policy.eval()
         with torch.no_grad():
-            s = torch.tensor(states, dtype=torch.float32, device=self.device)
-            a = torch.tensor(actions, dtype=torch.float32, device=self.device)
-            pred = self.policy(s)
-            return self.criterion(pred, a).item()
+            import numpy as np
+
+            # 1) stack lists into contiguous arrays
+            s_np = np.array(states, dtype=np.float32)  # shape [B, state_dim]
+            a_np = np.array(actions, dtype=np.float32)  # shape [B, action_dim]
+
+            # 2) convert to tensors
+            s = torch.from_numpy(s_np).to(self.device)  # [B, S]
+            labels = torch.from_numpy(
+                a_np.argmax(axis=1).astype(np.int64)  # one-hot → [B] class indices
+            ).to(self.device)
+
+            # 3) forward + CE loss
+            logits = self.policy(s)  # [B, action_dim]
+            loss = self.policy_criterion(logits, labels)  # nn.CrossEntropyLoss
+
+            return loss.item()
+
+    # def get_idm_loss(self, states, next_states, actions):
+    #     self.idm.eval()
+    #     with torch.no_grad():
+    #         # s = torch.tensor(states, dtype=torch.float32, device=self.device)
+    #         # ns = torch.tensor(next_states, dtype=torch.float32, device=self.device)
+    #         # stack lists of np.ndarray into contiguous arrays
+    #         s_np = np.array(states, dtype=np.float32)
+    #         ns_np = np.array(next_states, dtype=np.float32)
+    #         a_np = np.array(actions, dtype=np.float32)
+    #
+    #         # convert once to tensors
+    #         s = torch.from_numpy(s_np).to(self.device)
+    #         ns = torch.from_numpy(ns_np).to(self.device)
+    #         a = torch.from_numpy(a_np).to(
+    #             self.device
+    #         )  # a = torch.tensor(actions, dtype=torch.float32, device=self.device)
+    #         pred = self.idm(s, ns)
+    #         return self.criterion(pred, a).item()
 
     def get_idm_loss(self, states, next_states, actions):
+        """
+        Compute the inverse‐dynamics model’s cross‐entropy loss on
+        (states, next_states, one‐hot actions).
+        """
         self.idm.eval()
         with torch.no_grad():
-            # s = torch.tensor(states, dtype=torch.float32, device=self.device)
-            # ns = torch.tensor(next_states, dtype=torch.float32, device=self.device)
-            # stack lists of np.ndarray into contiguous arrays
-            s_np = np.array(states, dtype=np.float32)
-            ns_np = np.array(next_states, dtype=np.float32)
-            a_np = np.array(actions, dtype=np.float32)
+            import numpy as np
 
-            # convert once to tensors
-            s = torch.from_numpy(s_np).to(self.device)
-            ns = torch.from_numpy(ns_np).to(self.device)
-            a = torch.from_numpy(a_np).to(
-                self.device
-            )  # a = torch.tensor(actions, dtype=torch.float32, device=self.device)
-            pred = self.idm(s, ns)
-            return self.criterion(pred, a).item()
+            # 1) stack lists into contiguous arrays
+            s_np = np.array(states, dtype=np.float32)  # [B, state_dim]
+            ns_np = np.array(next_states, dtype=np.float32)  # [B, state_dim]
+            a_np = np.array(actions, dtype=np.float32)  # [B, action_dim]
+
+            # 2) to tensors
+            s = torch.from_numpy(s_np).to(self.device)  # [B, S]
+            ns = torch.from_numpy(ns_np).to(self.device)  # [B, S]
+            labels = torch.from_numpy(
+                a_np.argmax(axis=1).astype(np.int64)  # one-hot → [B]
+            ).to(self.device)
+
+            # 3) forward + CE loss
+            logits = self.idm(s, ns)  # [B, action_dim]
+            loss = self.idm_criterion(logits, labels)  # nn.CrossEntropyLoss
+
+            return loss.item()
 
     def pre_demonstration(self):
         """override: uniform random actions to collect (s, s', a)"""
